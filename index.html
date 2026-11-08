@@ -115,11 +115,11 @@
     async function sendGcodeLine(command) {
       if (!writer) return false;
       log('> ' + command);
-      await writer.write(command + '\n');
-      await new Promise(r => setTimeout(r, 50));
+      // \n を \r\n に変更
+      await writer.write(command + '\r\n');
+      await new Promise(r => setTimeout(r, 100)); // 待機時間を少し伸ばす(100ms)
       return true;
     }
-
     // --- データ送信（生徒用） ---
     function submitData() {
       const fileInput = document.getElementById('svgFile');
@@ -225,9 +225,11 @@
         });
     }
 
-    // --- 簡易 SVG to G-code パース機能 ---
+// --- 簡易 SVG to G-code パース機能 ---
     function convertSvgToGcode(svgString) {
-      const gcode = ["G90", "G21", "M5"];
+      // 先頭に $X (アラーム解除) と G92 X0 Y0 (現在地を原点リセット) を追加
+      const gcode = ["$X", "G90", "G21", "G92 X0 Y0", "M5"];
+      
       const parser = new DOMParser();
       const doc = parser.parseFromString(svgString, "image/svg+xml");
       const paths = doc.querySelectorAll("path");
@@ -247,6 +249,7 @@
             gcode.push("M5");
             if (args.length >= 2) gcode.push(`G0 X${args[0].toFixed(3)} Y${args[1].toFixed(3)}`);
           } else if (type === 'L' || type === 'l') {
+            // S出力値をGRBL標準に合わせて調整 (例: S200 または S1000)
             gcode.push("M3 S200");
             if (args.length >= 2) gcode.push(`G1 X${args[0].toFixed(3)} Y${args[1].toFixed(3)} F1000`);
           }
@@ -254,6 +257,9 @@
         gcode.push("M5");
       });
 
+      gcode.push("M5", "G0 X0 Y0");
+      return gcode;
+    }
       gcode.push("M5", "G0 X0 Y0");
       return gcode;
     }
