@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>レーザー加工制御 & データ管理 (Web Serial対応版)</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f4f6f8; color: #333; }
+    .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    h2 { margin-top: 0; color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, select, button { padding: 8px 12px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; }
+    button { background: #1a73e8; color: white; border: none; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1557b0; }
+    .btn-connect { background: #34a853; }
+    .btn-connect:hover { background: #2d8e47; }
+    .btn-send { background: #ea4335; }
+    .btn-send:hover { background: #d93025; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+    #logConsole { background: #1e1e1e; color: #00ff00; padding: 10px; height: 140px; overflow-y: scroll; font-family: monospace; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+  <!-- 1. 生徒用提出フォーム -->
+  <div class="card">
+    <h2>📤 データ提出 (生徒用)</h2>
+    <form id="uploadForm">
+      <label>クラス:</label>
+      <input type="text" id="classGroup" required placeholder="例: 2A">
+      <label>出席番号:</label>
+      <input type="number" id="studentNum" required placeholder="例: 15">
+      <label>氏名:</label>
+      <input type="text" id="studentName" required placeholder="例: 山田太郎">
+      <label>サイズ (幅 x 高さ mm):</label>
+      <div style="display:flex; gap:10px;">
+        <input type="number" id="width" placeholder="幅(mm)" required>
+        <input type="number" id="height" placeholder="高さ(mm)" required>
+      </div>
+      <label>SVGファイル:</label>
+      <input type="file" id="svgFile" accept=".svg" required>
+      <br><br>
+      <button type="button" onclick="submitData()">送信する</button>
+    </form>
+  </div>
+
+  <!-- 2. 教員用 シリアル通信 ＆ レーザー加工制御 -->
+  <div class="card">
+    <h2>⚙️ レーザー加工制御 (教員専用 / USB接続)</h2>
+    
+    <div>
+      <strong>USBシリアル接続: </strong>
+      <button class="btn-connect" onclick="connectSerial()">Chromebookとレーザー機を接続</button>
+      <span id="serialStatus" style="margin-left: 10px; font-weight: bold; color: red;">未接続</span>
+    </div>
+
+    <hr style="margin: 15px 0;">
+
+    <button onclick="loadPendingList()">未加工リストを更新</button>
+    <table>
+      <thead>
+        <tr>
+          <th>クラス/番号/氏名</th>
+          <th>サイズ</th>
+          <th>ファイル名</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="pendingTableBody">
+        <tr><td colspan="4">リストを更新してください。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>通信ログ</h3>
+    <div id="logConsole">レーザー加工機への接続を行ってください...<br></div>
+  </div>
+
+  <script>
+    // ★ ここをご自身の GAS デプロイURL に書き換えてください ★
+    const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzDLtTT8z_ljsPWxB-XQ-6s55w9DOjXWBBJTFp3b2KOOg6__gGWb3BDg1CtJ3gdBMMI/exec";
+
+    let port = null;
+    let writer = null;
+
+    function log(msg) {
+      const consoleDiv = document.getElementById('logConsole');
+      consoleDiv.innerHTML += msg + '<br>';
+      consoleDiv.scrollTop = consoleDiv.scrollHeight;
+    }
+
+    // --- Web Serial 接続処理 ---
+    async function connectSerial() {
+      if (!('serial' in navigator)) {
+        alert('Web Serial API に非対応のブラウザです。Chromeをご利用ください。');
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 }); // Creality A1 Pro / GRBL標準
+
+        const textEncoder = new TextEncoderStream();
+        textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        document.getElementById('serialStatus').innerText = '接続完了';
+        document.getElementById('serialStatus').style.color = 'green';
+        log('SYSTEM: レーザー加工機にシリアル接続しました (115200 bps)。');
+      } catch (err) {
+        log('ERROR: 接続失敗 - ' + err);
+      }
+    }
+
+    // G-code送信処理
+    async function sendGcodeLine(command) {
+      if (!writer) return false;
+      log('> ' + command);
+      await writer.write(command + '\n');
+      await new Promise(r => setTimeout(r, 50));
+      return true;
+    }
+
+    // --- データ送信（生徒用） ---
+    function submitData() {
+      const fileInput = document.getElementById('svgFile');
+      const file = fileInput.files[0];
+      if (!file) return alert('ファイルを選択してください');
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const payload = {
+          action: "upload",
+          classGroup: document.getElementById('classGroup').value,
+          studentNum: document.getElementById('studentNum').value,
+          studentName: document.getElementById('studentName').value,
+          width: document.getElementById('width').value,
+          height: document.getElementById('height').value,
+          fileData: e.target.result
+        };
+
+        log('SYSTEM: データをアップロード中...');
+        fetch(GAS_WEB_APP_URL, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(res => {
+          alert(res.message);
+          if (res.success) {
+            document.getElementById('uploadForm').reset();
+            loadPendingList();
+          }
+        })
+        .catch(err => log('ERROR: アップロード失敗 - ' + err));
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // --- 未加工リスト取得 ---
+    function loadPendingList() {
+      log('SYSTEM: 未加工リストを取得中...');
+      fetch(`${GAS_WEB_APP_URL}?action=getPending`)
+        .then(res => res.json())
+        .then(data => {
+          const tbody = document.getElementById('pendingTableBody');
+          tbody.innerHTML = '';
+          if (data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4">未加工のデータはありません。</td></tr>';
+            return;
+          }
+          data.forEach(item => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${item.classGroup} ${item.studentNum}番 ${item.studentName}</td>
+              <td>${item.size}</td>
+              <td>${item.fileName}</td>
+              <td>
+                <button class="btn-send" onclick="processAndPrint('${item.fileId}', ${item.rowIndex})">加工開始</button>
+              </td>
+            `;
+            tbody.appendChild(tr);
+          });
+          log('SYSTEM: リスト更新完了。');
+        })
+        .catch(err => log('ERROR: リスト取得失敗 - ' + err));
+    }
+
+    // --- 加工実行＆シリアル送信 ---
+    function processAndPrint(fileId, rowIndex) {
+      if (!writer) {
+        alert('加工を開始する前に、USB接続ボタンを押して機器と接続してください。');
+        return;
+      }
+      if (!confirm('加工を開始しますか？')) return;
+
+      log('SYSTEM: GoogleドライブからSVGデータを取得中...');
+      fetch(`${GAS_WEB_APP_URL}?action=getSvg&fileId=${fileId}`)
+        .then(res => res.json())
+        .then(async res => {
+          if (!res.success) {
+            alert('取得エラー: ' + res.message);
+            return;
+          }
+
+          const gcodeList = convertSvgToGcode(res.content);
+          log(`SYSTEM: G-code生成完了 (${gcodeList.length} 行)。機器へ送信中...`);
+
+          for (let cmd of gcodeList) {
+            await sendGcodeLine(cmd);
+          }
+
+          log('SYSTEM: 送信完了。ステータスを完了に更新中...');
+          
+          fetch(GAS_WEB_APP_URL, {
+            method: 'POST',
+            body: JSON.stringify({ action: "markCompleted", fileId: fileId, rowIndex: rowIndex })
+          })
+          .then(r => r.json())
+          .then(doneRes => {
+            if (doneRes.success) {
+              alert('加工および「完了」移動が完了しました。');
+              loadPendingList();
+            }
+          });
+        });
+    }
+
+    // --- 簡易 SVG to G-code パース機能 ---
+    function convertSvgToGcode(svgString) {
+      const gcode = ["G90", "G21", "M5"];
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgString, "image/svg+xml");
+      const paths = doc.querySelectorAll("path");
+
+      paths.forEach(path => {
+        const d = path.getAttribute("d");
+        if (!d) return;
+
+        const commands = d.match(/([a-df-z][^a-df-z]*)/gi);
+        if (!commands) return;
+
+        commands.forEach(cmd => {
+          const type = cmd[0];
+          const args = cmd.slice(1).trim().split(/[\s,]+/).map(Number);
+
+          if (type === 'M' || type === 'm') {
+            gcode.push("M5");
+            if (args.length >= 2) gcode.push(`G0 X${args[0].toFixed(3)} Y${args[1].toFixed(3)}`);
+          } else if (type === 'L' || type === 'l') {
+            gcode.push("M3 S200");
+            if (args.length >= 2) gcode.push(`G1 X${args[0].toFixed(3)} Y${args[1].toFixed(3)} F1000`);
+          }
+        });
+        gcode.push("M5");
+      });
+
+      gcode.push("M5", "G0 X0 Y0");
+      return gcode;
+    }
+  </script>
+</body>
+</html>
